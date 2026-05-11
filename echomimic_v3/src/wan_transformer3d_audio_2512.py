@@ -1401,13 +1401,11 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         ])
 
         # time embeddings
-        autocast_device = "mps" if "mps" in str(device) else "cuda"
-        with torch.autocast(device_type=autocast_device, dtype=torch.float32, enabled=(device.type != "cpu")):
-            e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
-            e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
-            e0 = e0.to(dtype)
-            e = e.to(dtype)
+        e = self.time_embedding(
+            sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
+        e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
+        e0 = e0.to(dtype)
+        e = e.to(dtype)
 
         context, context_audio, latent_t, ip_mask = context
         first_frame_audio_emb_s, latter_frame_audio_emb_s = get_ai2v_audio(context_audio, 
@@ -1509,7 +1507,8 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
                     if block_index < len(gpu_manager.managed_modules):
                         module = gpu_manager.managed_modules[block_index]
                         if hasattr(module, 'to'):
-                            module.to(gpu_manager.device)
+                            # Force dtype=dtype (float32) during offload move to prevent precision loss on Mac
+                            module.to(gpu_manager.device, dtype=dtype)
                     if block_index > 0 and (block_index - 1) < len(gpu_manager.managed_modules):
                         prev_module = gpu_manager.managed_modules[block_index - 1]
                         if hasattr(prev_module, 'to'):

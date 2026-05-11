@@ -1262,13 +1262,11 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         ])
         
         # time embeddings
-        autocast_device = "mps" if "mps" in str(device) else "cuda"
-        with torch.autocast(device_type=autocast_device, dtype=torch.float32, enabled=(device.type != "cpu")):
-            e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
-            e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
-            e0 = e0.to(dtype)
-            e = e.to(dtype)
+        e = self.time_embedding(
+            sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
+        e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
+        e0 = e0.to(dtype)
+        e = e.to(dtype)
 
         context, context_audio, latent_t, ip_mask, audio_scale = context
 
