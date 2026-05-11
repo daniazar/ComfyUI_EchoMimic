@@ -811,6 +811,10 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
+                # Check for latents explosion
+                if i % 1 == 0:
+                    print(f"Step {i}: latents range [{latents.min().item():.4f}, {latents.max().item():.4f}] abs_max: {latents.abs().max().item():.4f}")
+
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
                     for k in callback_on_step_end_tensor_inputs:
