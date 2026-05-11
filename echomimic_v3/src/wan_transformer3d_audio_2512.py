@@ -11,7 +11,6 @@ from typing import Any, Dict, Optional, Union
 
 import numpy as np
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
@@ -586,7 +585,7 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
-@amp.autocast(enabled=False)
+
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
     freqs = torch.outer(
@@ -597,7 +596,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 # modified from https://github.com/thu-ml/RIFLEx/blob/main/riflex_utils.py
-@amp.autocast(enabled=False)
+
 def get_1d_rotary_pos_embed_riflex(
     pos: Union[np.ndarray, int],
     dim: int,
@@ -674,7 +673,7 @@ def get_resize_crop_region_for_grid(src, tgt_width, tgt_height):
 
     return (crop_top, crop_left), (crop_top + resize_height, crop_left + resize_width)
 
-@amp.autocast(enabled=False)
+
 def rope_apply(x, grid_sizes, freqs):
     n, c = x.size(2), x.size(3) // 2
 
@@ -1402,11 +1401,11 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         ])
 
         # time embeddings
-        with amp.autocast(dtype=torch.float32):
+        autocast_device = "mps" if "mps" in str(device) else "cuda"
+        with torch.autocast(device_type=autocast_device, dtype=torch.float32, enabled=(device.type != "cpu")):
             e = self.time_embedding(
                 sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
             e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
-            # to bfloat16 for saving memeory
             e0 = e0.to(dtype)
             e = e.to(dtype)
 
@@ -1510,8 +1509,7 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
                     if block_index < len(gpu_manager.managed_modules):
                         module = gpu_manager.managed_modules[block_index]
                         if hasattr(module, 'to'):
-                            # Force dtype=dtype (float32) during offload move to prevent precision loss on Mac
-                            module.to(gpu_manager.device, dtype=dtype)
+                            module.to(gpu_manager.device)
                     if block_index > 0 and (block_index - 1) < len(gpu_manager.managed_modules):
                         prev_module = gpu_manager.managed_modules[block_index - 1]
                         if hasattr(prev_module, 'to'):

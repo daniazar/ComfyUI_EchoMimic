@@ -107,11 +107,14 @@ def resize_mask(mask, latent, process_first_frame_only=True):
     latent_size = latent.size()
     batch_size, channels, num_frames, height, width = mask.shape
 
+    # Force interpolation to CPU as MPS trilinear interpolation is often unstable or missing
+    mask_cpu = mask.to("cpu", dtype=torch.float32)
+    
     if process_first_frame_only:
         target_size = list(latent_size[2:])
         target_size[0] = 1
         first_frame_resized = F.interpolate(
-            mask[:, :, 0:1, :, :],
+            mask_cpu[:, :, 0:1, :, :],
             size=target_size,
             mode='trilinear',
             align_corners=False
@@ -121,7 +124,7 @@ def resize_mask(mask, latent, process_first_frame_only=True):
         target_size[0] = target_size[0] - 1
         if target_size[0] != 0:
             remaining_frames_resized = F.interpolate(
-                mask[:, :, 1:, :, :],
+                mask_cpu[:, :, 1:, :, :],
                 size=target_size,
                 mode='trilinear',
                 align_corners=False
@@ -132,12 +135,12 @@ def resize_mask(mask, latent, process_first_frame_only=True):
     else:
         target_size = list(latent_size[2:])
         resized_mask = F.interpolate(
-            mask,
+            mask_cpu,
             size=target_size,
             mode='trilinear',
             align_corners=False
         )
-    return resized_mask
+    return resized_mask.to(latent.device, dtype=latent.dtype)
 
 
 @dataclass
@@ -771,6 +774,10 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                 # On MPS, autocast can cause numerical instability if weight_dtype is float32
                 use_autocast = not ("mps" in str(device) and weight_dtype == torch.float32)
                 
+                # Check for NaNs in input
+                if torch.isnan(latent_model_input).any():
+                    print(f"!!! CRITICAL: latents contain NaNs at step {i} !!!")
+                
                 with torch.autocast(device_type=autocast_device, dtype=weight_dtype, enabled=use_autocast):
                     noise_pred = self.transformer(
                         x=latent_model_input,
@@ -794,6 +801,12 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                         )
                     
                         noise_pred = noise_pred_un + self._audio_guidance_scale * (noise_pred - noise_pred_un)
+
+                # Check for NaNs in output
+                if torch.isnan(noise_pred).any():
+                    print(f"!!! CRITICAL: noise_pred contains NaNs at step {i} !!!")
+                elif i % 5 == 0:
+                    print(f"Step {i}: noise_pred range [{noise_pred.min().item():.4f}, {noise_pred.max().item():.4f}]")
                     
                 # compute the previous noisy sample x_t -> x_t-1
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]

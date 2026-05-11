@@ -766,7 +766,8 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                 timestep = t.expand(latent_model_input.shape[0])
 
                 # predict noise model_output
-                with torch.cuda.amp.autocast(dtype=weight_dtype):
+                autocast_device = "mps" if torch.backends.mps.is_available() else "cuda"
+                with torch.autocast(device_type=autocast_device, dtype=weight_dtype):
                     noise_pred = self.transformer(
                         x=latent_model_input,
                         context=(in_prompt_embeds, audio_embeds, latent_model_input.shape[2], ip_mask, audio_scale),
