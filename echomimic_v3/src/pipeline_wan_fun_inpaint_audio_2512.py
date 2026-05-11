@@ -587,9 +587,15 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
 
         # Ensure all embeddings are in the same precision as the model (float32 for M4)
         if prompt_embeds is not None:
-            prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+            if isinstance(prompt_embeds, list):
+                prompt_embeds = [u.to(dtype=weight_dtype) for u in prompt_embeds]
+            else:
+                prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
         if negative_prompt_embeds is not None:
-            negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
+            if isinstance(negative_prompt_embeds, list):
+                negative_prompt_embeds = [u.to(dtype=weight_dtype) for u in negative_prompt_embeds]
+            else:
+                negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
         if audio_embeds is not None:
             audio_embeds = audio_embeds.to(dtype=weight_dtype)
         if clip_context is not None:
@@ -612,9 +618,16 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                 device=device,
             )
             # Ensure newly encoded embeds also match weight_dtype
-            prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+            if isinstance(prompt_embeds, list):
+                prompt_embeds = [u.to(dtype=weight_dtype) for u in prompt_embeds]
+            else:
+                prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+                
             if negative_prompt_embeds is not None:
-                negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
+                if isinstance(negative_prompt_embeds, list):
+                    negative_prompt_embeds = [u.to(dtype=weight_dtype) for u in negative_prompt_embeds]
+                else:
+                    negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
 
         # 4. Prepare timesteps
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
