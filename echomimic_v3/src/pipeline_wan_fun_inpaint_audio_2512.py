@@ -585,7 +585,18 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
         device=clip_context.device
         weight_dtype = clip_context.dtype
 
-        
+        # Ensure all embeddings are in the same precision as the model (float32 for M4)
+        if prompt_embeds is not None:
+            prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+        if negative_prompt_embeds is not None:
+            negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
+        if audio_embeds is not None:
+            audio_embeds = audio_embeds.to(dtype=weight_dtype)
+        if clip_context is not None:
+            clip_context = clip_context.to(dtype=weight_dtype)
+        if latents is not None:
+            latents = latents.to(dtype=weight_dtype)
+            
         do_classifier_free_guidance = guidance_scale > 1.0
 
         # 3. Encode input prompt
@@ -600,6 +611,10 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                 max_sequence_length=max_sequence_length,
                 device=device,
             )
+            # Ensure newly encoded embeds also match weight_dtype
+            prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
+            if negative_prompt_embeds is not None:
+                negative_prompt_embeds = negative_prompt_embeds.to(dtype=weight_dtype)
 
         # 4. Prepare timesteps
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
