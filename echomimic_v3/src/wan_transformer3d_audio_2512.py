@@ -1354,6 +1354,19 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         # params
         device = self.patch_embedding.weight.device
         dtype = x.dtype
+        
+        # On Mac MPS, ensure all conditioning modules and frequencies are in float32
+        if device.type == "mps":
+            dtype = torch.float32
+            if self.freqs.dtype != torch.float32 or self.freqs.device != device:
+                self.freqs = self.freqs.to(device=device, dtype=torch.float32)
+            # Ensure fixed modules are float32 to avoid internal bfloat16/float16 squashing
+            for m in [self.patch_embedding, self.text_embedding, self.time_embedding, self.time_projection, self.head]:
+                m.to(dtype=torch.float32)
+            if hasattr(self, 'img_emb') and self.img_emb is not None: self.img_emb.to(dtype=torch.float32)
+            if hasattr(self, 'control_adapter') and self.control_adapter is not None: self.control_adapter.to(dtype=torch.float32)
+            if hasattr(self, 'ref_conv') and self.ref_conv is not None: self.ref_conv.to(dtype=torch.float32)
+
         if self.freqs.device != device and torch.device(type="meta") != device:
             self.freqs = self.freqs.to(device)
 
@@ -1497,7 +1510,8 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
                     if block_index < len(gpu_manager.managed_modules):
                         module = gpu_manager.managed_modules[block_index]
                         if hasattr(module, 'to'):
-                            module.to(gpu_manager.device)
+                            # Force dtype=dtype (float32) during offload move to prevent precision loss on Mac
+                            module.to(gpu_manager.device, dtype=dtype)
                     if block_index > 0 and (block_index - 1) < len(gpu_manager.managed_modules):
                         prev_module = gpu_manager.managed_modules[block_index - 1]
                         if hasattr(prev_module, 'to'):

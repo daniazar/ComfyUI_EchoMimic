@@ -585,6 +585,12 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
         device=clip_context.device
         weight_dtype = clip_context.dtype
 
+        # Force float32 for all operations on Mac M4 to prevent numerical drift/explosions
+        if device.type == "mps":
+            weight_dtype = torch.float32
+            self.vae.to(torch.float32)
+            self.transformer.to(dtype=torch.float32)
+
         # Ensure all embeddings are in the same precision as the model (float32 for M4)
         if prompt_embeds is not None:
             if isinstance(prompt_embeds, list):
