@@ -353,38 +353,65 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
     def prepare_mask_latents(
         self, mask, masked_image, batch_size, height, width, dtype, device, generator, do_classifier_free_guidance, noise_aug_strength
     ):
-        if self.vae.device!=device:
+        import gc
+        # On Apple Silicon, CPU and MPS share unified memory, so the only way
+        # to reclaim space before a large VAE encode is to evict MPS cache and
+        # cast inputs to fp16 (halving their footprint).
+        gc.collect()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+        if self.vae.device != device:
             self.vae.to(device)
+
         if mask is not None:
             mask = mask.to(device=device, dtype=self.vae.dtype)
             bs = 1
             new_mask = []
             for i in range(0, mask.shape[0], bs):
+                # Extreme memory reclamation for Mac M4
+                if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                gc.collect()
+                
                 mask_bs = mask[i : i + bs]
                 mask_bs = self.vae.encode(mask_bs)[0]
                 mask_bs = mask_bs.mode()
                 new_mask.append(mask_bs)
-            mask = torch.cat(new_mask, dim = 0)
+            mask = torch.cat(new_mask, dim=0)
 
         if masked_image is not None:
             masked_image = masked_image.to(device=device, dtype=self.vae.dtype)
             bs = 1
             new_mask_pixel_values = []
             for i in range(0, masked_image.shape[0], bs):
+                # Extreme memory reclamation for Mac M4
+                if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                gc.collect()
+
                 mask_pixel_values_bs = masked_image[i : i + bs]
                 mask_pixel_values_bs = self.vae.encode(mask_pixel_values_bs)[0]
                 mask_pixel_values_bs = mask_pixel_values_bs.mode()
                 new_mask_pixel_values.append(mask_pixel_values_bs)
-            masked_image_latents = torch.cat(new_mask_pixel_values, dim = 0)
+            masked_image_latents = torch.cat(new_mask_pixel_values, dim=0)
         else:
             masked_image_latents = None
+
         self.vae.to("cpu")
+        gc.collect()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
         return mask, masked_image_latents
 
     def decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        if self.vae.device!=latents.device:
+        # Force float32 for VAE decoding to prevent artifacts on MPS
+        self.vae.to(torch.float32)
+        latents = latents.to(torch.float32)
+        
+        if self.vae.device != latents.device:
             self.vae.to(latents.device)
-        frames = self.vae.decode(latents.to(self.vae.dtype)).sample
+        frames = self.vae.decode(latents).sample
         frames = (frames / 2 + 0.5).clamp(0, 1)
         frames = frames.cpu().float().numpy()
         self.vae.to("cpu")
@@ -677,8 +704,9 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
 
         if block_offload:
-            from .wan_transformer3d_audio_2512 import BlockGPUManager     
-            gpu_manager = BlockGPUManager(device="cuda", )
+            from .wan_transformer3d_audio_2512 import BlockGPUManager
+            # Use the actual execution device instead of hardcoding "cuda"
+            gpu_manager = BlockGPUManager(device=str(device))
             gpu_manager.setup_for_inference(self.transformer)
         else:
             gpu_manager = None
@@ -702,12 +730,14 @@ class WanFunInpaintAudioPipeline(DiffusionPipeline):
                     y = torch.cat([mask_input, masked_video_latents_input], dim=1).to(device, weight_dtype) 
 
                 clip_context_input = clip_context
-                
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latent_model_input.shape[0])
-
+                
                 # predict noise model_output
-                with torch.cuda.amp.autocast(dtype=weight_dtype):
+                autocast_device = "mps" if "mps" in str(device) else "cuda"
+                # On MPS, autocast can cause numerical instability if weight_dtype is float32
+                use_autocast = not ("mps" in str(device) and weight_dtype == torch.float32)
+                
+                with torch.autocast(device_type=autocast_device, dtype=weight_dtype, enabled=use_autocast):
                     noise_pred = self.transformer(
                         x=latent_model_input,
                         context=(prompt_embeds, audio_embeds, latent_model_input.shape[2], None),

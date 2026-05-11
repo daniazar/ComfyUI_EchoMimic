@@ -24,7 +24,10 @@ from .src.fm_solvers import FlowDPMSolverMultistepScheduler
 from .src.fm_solvers_unipc import FlowUniPCMultistepScheduler
 from .src.cache_utils import get_teacache_coefficients
 from .infer import encode_prompt,get_image_to_video_latent3
-import decord
+try:
+    import decord  # not available on Mac ARM — only used in standalone main() which is commented out
+except ImportError:
+    decord = None
 import json
 import random
 import math
@@ -174,8 +177,13 @@ def loudness_norm(audio_array, sr=16000, lufs=-23):
     return normalized_audio
 
 
-def load_v3_flash(sampler_name,vae_path,inp_vae,weigths_current_path,config_path,node_dir,use_mmgp,device,fsdp_dit=True,weight_dtype_str="bfloat16",block_offload=False):
-    weight_dtype = torch.bfloat16 if weight_dtype_str == "bfloat16" else torch.float16
+def load_v3_flash(sampler_name,vae_path,inp_vae,weigths_current_path,config_path,node_dir,use_mmgp,device,fsdp_dit=True,weight_dtype_str="bfloat16",block_offload=False,quantize_transformer=True):
+    if weight_dtype_str == "float32":
+        weight_dtype = torch.float32
+    elif weight_dtype_str == "float16":
+        weight_dtype = torch.float16
+    else:
+        weight_dtype = torch.bfloat16
 
     # # Load audio models
     # audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec_model_dir, local_files_only=True).to('cpu')
@@ -184,6 +192,8 @@ def load_v3_flash(sampler_name,vae_path,inp_vae,weigths_current_path,config_path
 
     #device = set_multi_gpus_devices(ulysses_degree, ring_degree)
     config = OmegaConf.load(config_path)
+    # Use the passed argument for quantization
+    config.quantize_transformer = quantize_transformer
     model_name=os.path.join(node_dir,"Wan2.1-Fun-V1.1-1.3B-InP")
     transformer = WanTransformerAudioMask3DModel.from_pretrained(
          os.path.join(weigths_current_path,"transformer"),
@@ -442,7 +452,7 @@ def Flash_Echo_v3_predata(clip_image_encoder,text_encoder,tokenizer,prompt,negat
     video_length_actual = int((video_length_actual - 1) // temporal_compression_ratio * temporal_compression_ratio) + 1 if video_length_actual != 1 else 1
 
     # Get audio features
-    mel_input, sr = librosa.load(audio_path, sr=16000) #TODO: 
+    mel_input, sr = librosa.load(audio_path, sr=16000, res_type='soxr_hq') # Use soxr for Mac compatibility 
     mel_input = loudness_norm(mel_input, sr)
     mel_input = mel_input[:int(video_length_actual / 25 * sr)]
     

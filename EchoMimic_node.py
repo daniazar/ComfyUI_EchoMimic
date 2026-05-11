@@ -1,22 +1,92 @@
 # !/usr/bin/env python
 # -*- coding: UTF-8 -*-
-import io as io_base
-import os
-import random
-import numpy as np
+import sys
+from types import ModuleType
+
+# "Deep Shield" Monkeypatch for Mac M4
+# This is a multi-layered fix to kill the broken tensorflow-macos integration
+class MockTF:
+    Tensor = type('Tensor', (), {})
+    Variable = type('Variable', (), {})
+    @staticmethod
+    def is_tensor(x): return False
+
+# 1. Pre-emptively mock the module
+mock_tf = ModuleType('tensorflow')
+for attr in ['Tensor', 'Variable', 'is_tensor']:
+    setattr(mock_tf, attr, getattr(MockTF, attr))
+sys.modules['tensorflow'] = mock_tf
+
+# 2. Surgically disable Einops backends
+try:
+    import einops
+    import einops._backends
+    # Fix the active backend list
+    if hasattr(einops._backends, '_all_backends'):
+        einops._backends._all_backends = [b for b in einops._backends._all_backends if b.name != 'tensorflow']
+    
+    # Fix the classes to prevent re-instantiation
+    for cls in einops._backends.AbstractBackend.__subclasses__():
+        if getattr(cls, 'name', '') == 'tensorflow':
+            cls.is_appropriate_type = lambda self, x: False
+            cls.__init__ = lambda self: None # Prevent it from importing the real TF
+except Exception:
+    pass
+
 import torch
-import torchaudio
+import os
+import io as io_base
+import random
+import folder_paths
+import numpy as np
+from PIL import Image
 import gc
+import torch.nn.functional as F
 import platform
 import subprocess
+import einops
+
+# Check for MPS (Apple Silicon)
+if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+    # Use float32 on Mac for maximum numerical stability. 
+    # float16/bf16 can cause 'red glow' artifacts or noise in complex transformers on MPS.
+    weight_dtype = torch.float32
+    weight_dtype_str = "float32"
+else:
+    weight_dtype = torch.bfloat16
+    weight_dtype_str = "bfloat16"
+
+# Monkeypatch einops to completely remove TensorFlow backend which crashes on Mac M4
+try:
+    import einops._backends
+    # Remove from the instance list
+    if hasattr(einops._backends, '_all_backends'):
+        einops._backends._all_backends = [b for b in einops._backends._all_backends if b.name != 'tensorflow']
+    # Also patch the class just in case of lazy re-init
+    for cls in einops._backends.AbstractBackend.__subclasses__():
+        if getattr(cls, 'name', '') == 'tensorflow':
+            cls.is_appropriate_type = lambda self, x: False
+            cls.__init__ = lambda self: None
+except Exception:
+    pass
+
 
 import folder_paths
+import comfy.model_management as mm
 
 os.environ['DEEPFACE_HOME'] = os.path.join(folder_paths.models_dir,"echo_mimic")
 print(os.path.join(folder_paths.models_dir,"echo_mimic"))
 
 from .utils import find_directories,process_video, cf_tensor2cv,process_video_v2,load_images,nomarl_upscale
-from .origin_infer import Echo_v1_load_model,Echo_v2_load_model,Echo_v1_predata,Echo_v2_predata
+# V1/V2 imports may fail on Mac due to diffusers/sklearn/numpy version conflicts.
+# V3_flash does not need them — wrapped to allow graceful degradation.
+try:
+    from .origin_infer import Echo_v1_load_model,Echo_v2_load_model,Echo_v1_predata,Echo_v2_predata
+    _v1v2_available = True
+except Exception as _e:
+    print(f"[EchoMimic] V1/V2 inference skipped (not needed for V3_flash): {_e}")
+    _v1v2_available = False
+    Echo_v1_load_model = Echo_v2_load_model = Echo_v1_predata = Echo_v2_predata = None
 from .echomimic_v3.infer import load_v3_model,infer_v3,Config,Echo_v3_predata
 from .echomimic_v3.infer_flash_pro import load_v3_flash,infer_flash,Flash_Echo_v3_predata
 
@@ -118,7 +188,13 @@ class Echo_LoadModel:
             lora_path=folder_paths.get_full_path("loras", lora) if lora!="None" else None
             if "V3_flash"==version :
                 inp_vae="none"
-                model,temporal_compression_ratio,tokenizer= load_v3_flash("Flow_Unipc",vae,inp_vae,weigths_current_path,os.path.join(current_path, "echomimic_v3/config/config.yaml"),current_path, use_mmgp,device,block_offload)
+                model,temporal_compression_ratio,tokenizer= load_v3_flash(
+                    "Flow_Unipc", vae, inp_vae, weigths_current_path, 
+                    os.path.join(current_path, "echomimic_v3/config/config.yaml"), 
+                    current_path, use_mmgp, device, 
+                    fsdp_dit=True, weight_dtype_str=weight_dtype_str,
+                    block_offload=block_offload, quantize_transformer=lowvram
+                )
             else:
                 model, temporal_compression_ratio,tokenizer=load_v3_model(current_path,weigths_current_path,config_v3, device,use_mmgp,vae,lora_path)
         print("##### model loaded #####")
@@ -188,7 +264,10 @@ class Echo_Predata:
         audio_file = os.path.join(folder_paths.get_input_directory(), f"audio_{audio_file_prefix}_temp.wav")
         buff = io_base.BytesIO()
    
-        torchaudio.save(buff, audio["waveform"].squeeze(0), audio["sample_rate"], format="FLAC")
+        import soundfile as sf
+        # waveform is [C, L], soundfile expects [L, C]
+        wav_data = audio["waveform"].squeeze(0).cpu().numpy().T
+        sf.write(buff, wav_data, audio["sample_rate"], format="FLAC")
         with open(audio_file, 'wb') as f:
             f.write(buff.getbuffer())
 
@@ -202,7 +281,7 @@ class Echo_Predata:
         elif version=="V3_flash":
             emb = Flash_Echo_v3_predata(image_encoder,text_encoder,info.get("tokenizer"),prompt,negative_prompt,
                                             face_img,(768,768),audio_file,weigths_current_path,fps,length,
-                                            info.get("temporal_compression_ratio"),device,torch.bfloat16)
+                                            info.get("temporal_compression_ratio"),device,weight_dtype)
         else:
             config=info.get("config")
             config.fps=fps
@@ -211,6 +290,12 @@ class Echo_Predata:
             emb["config"]=config
         emb.update(info)
         emb.update({"audio_file_prefix":audio_file_prefix,"fps":fps,"height":height,"width":width})
+
+        # Clear models from Predata step immediately
+        mm.soft_empty_cache()
+        gc.collect()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 
         return (emb,)
 
@@ -223,11 +308,13 @@ class Echo_Sampler:
                 "model": ("MODEL_PIPE_E",),
                 "emb": ("MODEL_EMB_E",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": MAX_SEED}),
-                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 10.0, "step": 0.1, "round": 0.01}),
-                "steps": ("INT", {"default": 25, "min": 1, "max": 100}),
+                "cfg": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1, "round": 0.01}),
+                "steps": ("INT", {"default": 12, "min": 1, "max": 100}),
                 "sample_rate": ("INT", {"default": 16000, "min": 8000, "max": 48000, "step": 1000, }),
                 "context_frames": ("INT", {"default": 12, "min": 0, "max": 50}),
                 "context_overlap": ("INT", {"default": 3, "min": 0, "max": 10}),     
+                "audio_guidance_scale": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.1, "round": 0.01}),
+                "shift": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 10.0, "step": 0.1, "round": 0.01}),
                 "save_video": ("BOOLEAN", {"default": False},), },    
         }
     
@@ -236,8 +323,14 @@ class Echo_Sampler:
     FUNCTION = "em_main"
     CATEGORY = "EchoMimic"
     
-    def em_main(self,model, emb, seed, cfg, steps, sample_rate,context_frames, context_overlap,save_video,):
-        
+    def em_main(self,model, emb, seed, cfg, steps, sample_rate, context_frames, context_overlap, audio_guidance_scale, shift, save_video,):
+        # Force unload other models (CLIP, T5, etc.) and clear cache to free up memory for VAE/Transformer
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        gc.collect()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            
         version= emb.get("version")
         lowvram = emb.get("lowvram")
 
@@ -256,7 +349,7 @@ class Echo_Sampler:
                 output_video=infer_flash(model,emb.get("audio_embeds"),emb.get("prompt_embeds"),emb.get("negative_prompt_embeds"),emb.get("clip_context"),
                                          emb.get("fps"),steps,seed,emb.get("video_length_actual"),device,emb.get("block_offload"),
                                          emb.get("input_video"),emb.get("input_video_mask"),emb.get("sample_height"),emb.get("sample_width"),
-                                         cfg,emb.get("latent_frames"),emb.get("audio_file_prefix")
+                                         cfg,emb.get("latent_frames"),emb.get("audio_file_prefix"), audio_guidance_scale=audio_guidance_scale, shift=shift
                                          )
                                          
             else:
@@ -271,10 +364,15 @@ class Echo_Sampler:
                                     emb.get("ref_image_pil"),emb.get("audio_file_prefix"))
 
         frame_rate = float(emb.get("fps"))
-        if not lowvram and version!="V3":  # for upsacle ,need  VR
-            model.to("cpu")
+        # Aggressive final cleanup
+        del model
+        del emb
         gc.collect()
-        torch.cuda.empty_cache()
+        mm.soft_empty_cache()
+        mm.unload_all_models()
+        if hasattr(torch, 'mps') and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            
         return (load_images(output_video) , frame_rate)
 
 

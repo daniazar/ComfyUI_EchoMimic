@@ -426,7 +426,9 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    # MPS doesn't support float64, using float32 instead
+    dtype = torch.float32 if position.device.type == "mps" else torch.float64
+    position = position.to(dtype)
 
     # calculation
     sinusoid = torch.outer(
@@ -441,7 +443,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     freqs = torch.outer(
         torch.arange(max_seq_len),
         1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+                        torch.arange(0, dim, 2).to(torch.float32).div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
@@ -483,7 +485,7 @@ def get_1d_rotary_pos_embed_riflex(
         pos = torch.from_numpy(pos)  # type: ignore  # [S]
 
     freqs = 1.0 / torch.pow(theta,
-        torch.arange(0, dim, 2).to(torch.float64).div(dim))
+        torch.arange(0, dim, 2).to(torch.float32).div(dim))
 
     # === Riflex modification start ===
     # Reduce the intrinsic frequency to stay within a single period after extrapolation (see Eq. (8)).
@@ -627,9 +629,12 @@ class WanSelfAttention(nn.Module):
 
         # query, key, value function
         def qkv_fn(x):
-            q = self.norm_q(self.q(x.to(dtype))).view(b, s, n, d)
-            k = self.norm_k(self.k(x.to(dtype))).view(b, s, n, d)
-            v = self.v(x.to(dtype)).view(b, s, n, d)
+            q_dtype = self.q.weight.dtype
+            k_dtype = self.k.weight.dtype
+            v_dtype = self.v.weight.dtype
+            q = self.norm_q(self.q(x.to(q_dtype))).view(b, s, n, d)
+            k = self.norm_k(self.k(x.to(k_dtype))).view(b, s, n, d)
+            v = self.v(x.to(v_dtype)).view(b, s, n, d)
             return q, k, v
 
         q, k, v = qkv_fn(x)
@@ -644,7 +649,7 @@ class WanSelfAttention(nn.Module):
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -660,9 +665,9 @@ class WanT2VCrossAttention(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.q(x.to(dtype))).view(b, -1, n, d)
-        k = self.norm_k(self.k(context.to(dtype))).view(b, -1, n, d)
-        v = self.v(context.to(dtype)).view(b, -1, n, d)
+        q = self.norm_q(self.q(x.to(self.q.weight.dtype))).view(b, -1, n, d)
+        k = self.norm_k(self.k(context.to(self.k.weight.dtype))).view(b, -1, n, d)
+        v = self.v(context.to(self.v.weight.dtype)).view(b, -1, n, d)
 
         # compute attention
         x = attention(
@@ -675,7 +680,7 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -732,7 +737,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         x = x.flatten(2)
         img_x = img_x.flatten(2)
         x = x + img_x
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -833,7 +838,7 @@ class WanI2VCrossAttentionAudio(WanSelfAttention):
         img_x = img_x.flatten(2)
         audio_x = audio_x.flatten(2)
         x = x + img_x + audio_x * audio_scale
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 WAN_CROSSATTENTION_CLASSES = {
@@ -1220,7 +1225,7 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
 
         # embeddings
         # print(x[0].shape, 'x.shape')
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        x = [self.patch_embedding(u.unsqueeze(0).to(self.patch_embedding.weight.dtype)) for u in x]
         # print(x[0].shape, 'x.patah')
         """
         torch.Size([3, 16, 19, 122, 75]) latents.shape 19 torch.Size([3, 9150])
@@ -1233,7 +1238,7 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
 
         # add control adapter
         if self.control_adapter is not None and y_camera is not None:
-            y_camera = self.control_adapter(y_camera)
+            y_camera = self.control_adapter(y_camera.to(self.control_adapter.conv.weight.dtype))
             x = [u + v for u, v in zip(x, y_camera)]
 
         grid_sizes = torch.stack(
@@ -1261,8 +1266,8 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         # time embeddings
         with amp.autocast(dtype=torch.float32):
             e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, t).float())
-            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+                sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
+            e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
             # to bfloat16 for saving memeory
             # assert e.dtype == torch.float32 and e0.dtype == torch.float32
             e0 = e0.to(dtype)

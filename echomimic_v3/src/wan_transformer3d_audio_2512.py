@@ -311,8 +311,8 @@ class AudioProjModel(ModelMixin, ConfigMixin):
         audio_embeds_vf = audio_embeds_vf.view(batch_size_vf, window_size_vf * blocks_vf * channels_vf)
 
         # first projection
-        audio_embeds = torch.relu(self.proj1(audio_embeds))  
-        audio_embeds_vf = torch.relu(self.proj1_vf(audio_embeds_vf))  
+        audio_embeds = torch.relu(self.proj1(audio_embeds.to(self.proj1.weight.dtype)))  
+        audio_embeds_vf = torch.relu(self.proj1_vf(audio_embeds_vf.to(self.proj1_vf.weight.dtype)))  
         audio_embeds = rearrange(audio_embeds, "(bz f) c -> bz f c", bz=B)  
         audio_embeds_vf = rearrange(audio_embeds_vf, "(bz f) c -> bz f c", bz=B) 
         audio_embeds_c = torch.concat([audio_embeds, audio_embeds_vf], dim=1)  
@@ -320,9 +320,9 @@ class AudioProjModel(ModelMixin, ConfigMixin):
         audio_embeds_c = audio_embeds_c.view(batch_size_c*N_t, C_a)
 
         # second projection
-        audio_embeds_c = torch.relu(self.proj2(audio_embeds_c)) 
+        audio_embeds_c = torch.relu(self.proj2(audio_embeds_c.to(self.proj2.weight.dtype))) 
 
-        context_tokens = self.proj3(audio_embeds_c).reshape(batch_size_c*N_t, self.context_tokens, self.output_dim) 
+        context_tokens = self.proj3(audio_embeds_c.to(self.proj3.weight.dtype)).reshape(batch_size_c*N_t, self.context_tokens, self.output_dim) 
 
         # normalization and reshape
         context_tokens = self.norm(context_tokens)
@@ -575,7 +575,9 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    # MPS doesn't support float64, using float32 instead
+    dtype = torch.float32 if position.device.type == "mps" else torch.float64
+    position = position.to(dtype)
 
     # calculation
     sinusoid = torch.outer(
@@ -590,7 +592,7 @@ def rope_params(max_seq_len, dim, theta=10000):
     freqs = torch.outer(
         torch.arange(max_seq_len),
         1.0 / torch.pow(theta,
-                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+                        torch.arange(0, dim, 2).to(torch.float32).div(dim)))
     freqs = torch.polar(torch.ones_like(freqs), freqs)
     return freqs
 
@@ -632,7 +634,7 @@ def get_1d_rotary_pos_embed_riflex(
         pos = torch.from_numpy(pos)  # type: ignore  # [S]
 
     freqs = 1.0 / torch.pow(theta,
-        torch.arange(0, dim, 2).to(torch.float64).div(dim))
+        torch.arange(0, dim, 2).to(torch.float32).div(dim))
 
     # === Riflex modification start ===
     # Reduce the intrinsic frequency to stay within a single period after extrapolation (see Eq. (8)).
@@ -772,9 +774,12 @@ class WanSelfAttention(nn.Module):
 
         # query, key, value function
         def qkv_fn(x):
-            q = self.norm_q(self.q(x.to(dtype))).view(b, s, n, d)
-            k = self.norm_k(self.k(x.to(dtype))).view(b, s, n, d)
-            v = self.v(x.to(dtype)).view(b, s, n, d)
+            q_dtype = self.q.weight.dtype
+            k_dtype = self.k.weight.dtype
+            v_dtype = self.v.weight.dtype
+            q = self.norm_q(self.q(x.to(q_dtype))).view(b, s, n, d)
+            k = self.norm_k(self.k(x.to(k_dtype))).view(b, s, n, d)
+            v = self.v(x.to(v_dtype)).view(b, s, n, d)
             return q, k, v
 
         q, k, v = qkv_fn(x)
@@ -789,7 +794,7 @@ class WanSelfAttention(nn.Module):
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -805,9 +810,9 @@ class WanT2VCrossAttention(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.q(x.to(dtype))).view(b, -1, n, d)
-        k = self.norm_k(self.k(context.to(dtype))).view(b, -1, n, d)
-        v = self.v(context.to(dtype)).view(b, -1, n, d)
+        q = self.norm_q(self.q(x.to(self.q.weight.dtype))).view(b, -1, n, d)
+        k = self.norm_k(self.k(context.to(self.k.weight.dtype))).view(b, -1, n, d)
+        v = self.v(context.to(self.v.weight.dtype)).view(b, -1, n, d)
 
         # compute attention
         x = attention(
@@ -820,7 +825,7 @@ class WanT2VCrossAttention(WanSelfAttention):
 
         # output
         x = x.flatten(2)
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -875,7 +880,7 @@ class WanI2VCrossAttention(WanSelfAttention):
         x = x.flatten(2)
         img_x = img_x.flatten(2)
         x = x + img_x
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 
@@ -914,24 +919,24 @@ class WanI2VCrossAttentionAudio(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.q(x.to(dtype)))
-        q_auido = self.q_audio(q)
+        q = self.norm_q(self.q(x.to(self.q.weight.dtype)))
+        q_auido = self.q_audio(q.to(self.q_audio.weight.dtype))
         q = q.view(b, -1, n, d)
 
-        k = self.norm_k(self.k(context.to(dtype))).view(b, -1, n, d)
-        v = self.v(context.to(dtype)).view(b, -1, n, d)
+        k = self.norm_k(self.k(context.to(self.k.weight.dtype))).view(b, -1, n, d)
+        v = self.v(context.to(self.v.weight.dtype)).view(b, -1, n, d)
 
-        k_img = self.norm_k_img(self.k_img(context_img.to(dtype))).view(b, -1, n, d)
-        v_img = self.v_img(context_img.to(dtype)).view(b, -1, n, d)
+        k_img = self.norm_k_img(self.k_img(context_img.to(self.k_img.weight.dtype))).view(b, -1, n, d)
+        v_img = self.v_img(context_img.to(self.v_img.weight.dtype)).view(b, -1, n, d)
         context_audio = rearrange(context_audio, "b f w c -> (b f) w c")
 
-        k_audio = self.k_audio(context_audio.to(dtype))
+        k_audio = self.k_audio(context_audio.to(self.k_audio.weight.dtype))
         k_audio = self.norm_k_audio(k_audio)
 
         bt = k_audio.shape[0]
         k_audio = k_audio.view(bt, -1, n, d)
 
-        v_audio = self.v_audio(context_audio.to(dtype)).view(bt, -1, n, d)
+        v_audio = self.v_audio(context_audio.to(self.v_audio.weight.dtype)).view(bt, -1, n, d)
 
         q_auido = q.view(b * latent_t, -1, n, d)
         
@@ -968,7 +973,7 @@ class WanI2VCrossAttentionAudio(WanSelfAttention):
         img_x = img_x.flatten(2)
         audio_x = audio_x.flatten(2)
         x = x + img_x + audio_x * 1.
-        x = self.o(x)
+        x = self.o(x.to(self.o.weight.dtype))
         return x
 
 WAN_CROSSATTENTION_CLASSES = {
@@ -1052,7 +1057,7 @@ class WanAttentionBlock(nn.Module):
             temp_x = self.norm2(x) * (1 + e[4]) + e[3]
             temp_x = temp_x.to(dtype)
             
-            y = self.ffn(temp_x)
+            y = self.ffn(temp_x.to(self.ffn[0].weight.dtype))
             x = x + y * e[5]
             return x
 
@@ -1084,7 +1089,7 @@ class Head(nn.Module):
             e(Tensor): Shape [B, C]
         """
         e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
-        x = (self.head(self.norm(x) * (1 + e[1]) + e[0]))
+        x = (self.head( (self.norm(x) * (1 + e[1]) + e[0]).to(self.head.weight.dtype) ))
         return x
 
 
@@ -1099,7 +1104,7 @@ class MLPProj(torch.nn.Module):
             torch.nn.LayerNorm(out_dim))
 
     def forward(self, image_embeds):
-        clip_extra_context_tokens = self.proj(image_embeds)
+        clip_extra_context_tokens = self.proj(image_embeds.to(self.proj[1].weight.dtype))
         return clip_extra_context_tokens
 
 
@@ -1356,11 +1361,11 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        x = [self.patch_embedding(u.unsqueeze(0).to(self.patch_embedding.weight.dtype)) for u in x]
         
         # add control adapter
         if self.control_adapter is not None and y_camera is not None:
-            y_camera = self.control_adapter(y_camera)
+            y_camera = self.control_adapter(y_camera.to(self.control_adapter.conv.weight.dtype))
             x = [u + v for u, v in zip(x, y_camera)]
 
         grid_sizes = torch.stack(
@@ -1386,8 +1391,8 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
         # time embeddings
         with amp.autocast(dtype=torch.float32):
             e = self.time_embedding(
-                sinusoidal_embedding_1d(self.freq_dim, t).float())
-            e0 = self.time_projection(e).unflatten(1, (6, self.dim))
+                sinusoidal_embedding_1d(self.freq_dim, t).to(self.time_embedding[0].weight.dtype))
+            e0 = self.time_projection(e.to(self.time_projection[1].weight.dtype)).unflatten(1, (6, self.dim))
             # to bfloat16 for saving memeory
             e0 = e0.to(dtype)
             e = e.to(dtype)
@@ -1408,10 +1413,10 @@ class WanTransformerAudioMask3DModel(ModelMixin, ConfigMixin, FromOriginalModelM
                 torch.cat(
                     [u, u.new_zeros(self.text_len - u.size(0), u.size(1))])
                 for u in context
-            ]))
+            ]).to(self.text_embedding[0].weight.dtype))
 
         if clip_fea is not None:
-            context_clip = self.img_emb(clip_fea) 
+            context_clip = self.img_emb(clip_fea.to(self.img_emb.proj[1].weight.dtype)) 
             context = torch.concat([context_clip, context], dim=1)
 
         # Context Parallel

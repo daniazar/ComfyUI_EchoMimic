@@ -14,7 +14,10 @@ import numpy as np
 import torch
 from PIL import Image
 from omegaconf import OmegaConf
-from transformers import AutoTokenizer, Wav2Vec2Model, Wav2Vec2Processor
+from transformers import AutoTokenizer
+# Wav2Vec2 imports are lazy (only needed for V3 non-flash, not V3_flash)
+# Moving them here causes a numpy binary incompatibility on Mac via librosa→sklearn
+# from transformers import Wav2Vec2Model, Wav2Vec2Processor
 import comfy.model_management
 try:
     from moviepy.editor import  VideoFileClip, AudioFileClip
@@ -115,6 +118,7 @@ class Config:
 # --------------------- Helper Functions ---------------------
 def load_wav2vec_models(wav2vec_model_dir):
     """Load Wav2Vec models for audio feature extraction."""
+    from transformers import Wav2Vec2Model, Wav2Vec2Processor  # lazy import for Mac compat
     processor = Wav2Vec2Processor.from_pretrained(wav2vec_model_dir)
     model = Wav2Vec2Model.from_pretrained(wav2vec_model_dir).eval()
     model.requires_grad_(False)
